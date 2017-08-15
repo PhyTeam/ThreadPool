@@ -49,21 +49,9 @@ int main(int argc, char *argv[])
     cout << "Number of files is :" << files->size() << endl;
     // Create thread_pool
 
-    // Test
-    vector<long> list;
-    for (int i = 0; i < 1000; ++i) {
-        list.push_back(i);
-    }
-
-
-    mutex m;
     ThreadPool pool;
     for (size_t i = 0; i < 10; ++i) {
-        auto r = pool.submit([&pool, &m](const std::string& path) {
-            {
-                lock_guard<mutex> guard(cout_mutex);
-                cout << path << endl;
-            }
+        auto r = pool.submit([&pool](const std::string& path) {
             future<Mat> src = pool.submit([](const std::string& path) {
                 Mat src =  imread(path);
                 Mat dst;
@@ -96,11 +84,10 @@ int main(int argc, char *argv[])
 
             return dst;
         }, std::cref(files->at(i)));
+
         r.get();
     }
 
-    //imshow("Gfg", r.get());
-    //waitKey();
  /*
  #if 1
     int counter = 0;
