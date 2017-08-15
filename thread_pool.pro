@@ -38,4 +38,5 @@ DEFINES += QT_DEPRECATED_WARNINGS
 
 HEADERS += \
     threadsafe_queue.h \
-    threadpool.h
+    threadpool.h \
+    file_helper.h

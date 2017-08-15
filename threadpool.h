@@ -4,6 +4,7 @@
 #include <thread>
 #include <algorithm>
 #include <queue>
+#include <future>
 
 using namespace std;
 using namespace cv;
@@ -71,10 +72,7 @@ public:
 
 class ImageLoader {
 private:
-
-    DataSource* data_source;
     cv::Size _sz;
-
     Mat output;
 public:
     std::string path;
@@ -82,22 +80,15 @@ public:
     ImageLoader(const ImageLoader& other) {
         path = other.path;
         _sz = other._sz;
-        data_source = other.data_source;
     }
 
     ImageLoader& operator=(const ImageLoader& other) {
         path = other.path;
         _sz = other._sz;
-        data_source = other.data_source;
         return *this;
     }
 
     ImageLoader() {}
-
-    void setDataSource(DataSource* new_data_source)
-    {
-        data_source = new_data_source;
-    }
 
     Mat getImage()
     {
@@ -120,11 +111,9 @@ public:
         // Resize the image using resize
         resize(img, output, _sz);
 
-        // Push data to data source
-        data_source->push(this);
+        output = img;
 
-        //cout << "Called from " << this_thread::get_id() << " " << "load completed" << endl;
-        return true;
+        return this;
     }
 };
 
@@ -170,68 +159,128 @@ public:
     }
 };
 
-template <typename Task>
 class ThreadPool
 {
 private:
-    std::atomic_bool done;
-    std::atomic_int counter;
-    threadsafe_queue<Task> work_queue;
-    unsigned int numberOfThreads;
 
-    std::vector<std::thread> threads;
-    join_threads joiner;
-
-    bool is_done()
+    class ThreadWorker
     {
-        return done && work_queue.empty();
-    }
+    private:
+        ThreadPool* _pool;
+    public:
+        ThreadWorker(ThreadPool* pool): _pool(pool) {}
 
-    void worker_thread()
-    {
-        while (!is_done()) {
-            Task task;
-            if (work_queue.try_pop(task)) {
-                task();
-            } else {
-                std::this_thread::yield();
+        void operator() () {
+            std::function<void()> task;
+            bool dequeued;
+            {
+                lock_guard<mutex> m(cout_mutex);
+                cout << "Go to task..." << endl;
+            }
+            while (!_pool->_done) {
+#if 1
+                {
+                    std::unique_lock<std::mutex> lk(_pool->_mutex);
+                    if (_pool->_queue.empty()) {
+                       _pool->_conditional_lock.wait(lk);
+                    }
+                    dequeued = _pool->_queue.try_pop(task);
+                }
+
+                if (dequeued) {
+                    task();
+                }
+#else
+                if (_pool->_queue.try_pop(task)){
+                    task();
+                } else {
+                    this_thread::yield();
+                }
+#endif
             }
         }
-    }
+
+    };
+
+    bool                    _done;
+    std::mutex              _mutex;
+    std::condition_variable _conditional_lock;
+    threadsafe_queue<std::function<void()>>  _queue;
+    unsigned int            _num_threads;
+
+    std::vector<std::thread>    _threads;
+    join_threads                _joiner;
 
     void init()
     {
         try {
-            for (unsigned i = 0; i < numberOfThreads; ++ i) {
-                threads.push_back(std::thread(&ThreadPool::worker_thread, this));
+            for (unsigned i = 0; i < _num_threads; ++ i) {
+                _threads.push_back(std::thread(ThreadWorker(this)));
             }
         }
         catch(...) {
-            done = true;
+            _done = true;
             throw;
         }
     }
 
+
 public:
-    ThreadPool(): done(false), joiner(threads)
+    ThreadPool(): _done(false), _joiner(_threads)
     {
-        numberOfThreads = std::thread::hardware_concurrency();
+        _num_threads = std::thread::hardware_concurrency();
         init();
     }
 
-    ThreadPool(unsigned int number_of_thread): done(false), joiner(threads), numberOfThreads(number_of_thread)
+    ThreadPool(unsigned int number_of_thread): _done(false), _num_threads(number_of_thread), _joiner(_threads)
     {
         init();
     }
+
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool(ThreadPool&&) = delete;
+
+    ThreadPool& operator= (const ThreadPool&) = delete;
+    ThreadPool& operator=(ThreadPool&&) = delete;
 
     ~ThreadPool()
     {
-        done = true;
+        _done = true;
+        _conditional_lock.notify_all();
+        // Join thread
+        // in join_thread::~join_thread
     }
 
-    void submit(const Task& path)
+    void run_pending_task()
     {
-        work_queue.push(path);
+
+        cout << "~";
+        function<void()> task;
+
+        if (! _queue.try_pop(task)){
+            task();
+        } else {
+            this_thread::yield();
+        }
+    }
+
+
+
+    template<typename F, typename...Args>
+    auto submit(F&& f, Args&&... args) -> std::future<decltype(f(args...))> {
+        std::function<decltype(f(args...))()> func = std::bind(std::forward<F>(f), std::forward<Args>(args)...);
+
+        auto task_ptr = std::make_shared<std::packaged_task<decltype(f(args...))()>>(func);
+
+        std::function<void()> wrapper_func = [task_ptr] {
+            (*task_ptr)();
+        };
+
+        _queue.push(wrapper_func);
+
+        _conditional_lock.notify_one();
+
+        return task_ptr->get_future();
     }
 
 };

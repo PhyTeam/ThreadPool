@@ -1,10 +1,6 @@
 #include <stdio.h>
 #include <utility>
 
-// For read folders and files
-#include <sys/types.h>
-#include <dirent.h>
-
 #include <thread>
 
 #include <atomic>
@@ -12,6 +8,9 @@
 #include <future>
 #include <chrono>
 #include <functional>
+#include <numeric>
+#include <type_traits>
+
 
 #include <stack>
 
@@ -19,67 +18,28 @@
 
 #include "threadsafe_queue.h"
 #include "threadpool.h"
+#include "file_helper.h"
 
 using namespace std;
 using namespace cv;
 
 std::condition_variable conditional_var;
 
-
-shared_ptr<vector<string>> list_image_file(const string& root)
+template<typename Iterator,typename T>
+struct accumulate_block
 {
-    shared_ptr<vector<string>> result(new vector<string>);
-
-    string folder = root;
-    DIR* dp;
-    struct dirent* _dirent;
-
-    // DF Travel
-    stack<string> _remainDirs;
-    _remainDirs.push(folder);
-
-    vector<string> accepted_ext {"jpg", "png"}; //  Accepted file extensions
-    //vector<string> image_files;
-    while (!_remainDirs.empty())
+    T operator()(Iterator first,Iterator last)
     {
-        string current_path = _remainDirs.top();
-        _remainDirs.pop();
-        dp = opendir(current_path.c_str());
-        _dirent = NULL;
-        //unsigned counter = 0;
-        while ((_dirent = readdir(dp)) != NULL)
-        {
-           //cout  << counter++ << ") " << _dirent->d_name << " " << ((_dirent->d_type == DT_DIR) ? "Folder" : "Others")  << endl;
-           string dirname(_dirent->d_name);
-           if (!(dirname.compare(".") == 0) && !(dirname.compare("..") == 0)) {
-               //printf("%d) %s (%s)\n", counter++, _dirent->d_name, (_dirent->d_type == DT_DIR) ? "Folder" : "Others");
-               // Check dir type
-               if (_dirent->d_type == DT_DIR) {
-                    string full_path = current_path + "/" + dirname;
-                    _remainDirs.push(full_path);
-                   //cout << full_path << endl;
-               } // end if type
+        return std::accumulate(first,last, T());
+    }
+};
 
-               if (_dirent->d_type == DT_REG) {
-                   auto it = find_if(dirname.rbegin(), dirname.rend(), [](char c) { return c == '.'; });
-                   string ext = string(it.base(), dirname.end());
-                   bool is_accepted = false;
-                   for (auto i = accepted_ext.begin(); i != accepted_ext.end(); ++i) {
-                       is_accepted |= (*i).compare(ext) == 0;
-                   }
-                   if (is_accepted)
-                   {
-                       string file_path = current_path + "/" + dirname;
-                       //cout << file_path << endl;
-                       result->push_back(file_path);
-                   }
-               }
+namespace pool {
 
-           } //  end if
-        } // dir loop
-        closedir(dp);
-    } // dft
-    return result;
+}
+
+int sum(int i, int j) {
+    return i + j;
 }
 
 int main(int argc, char *argv[])
@@ -88,6 +48,60 @@ int main(int argc, char *argv[])
     auto files = list_image_file("/Users/bbphuc/Desktop/fddb");
     cout << "Number of files is :" << files->size() << endl;
     // Create thread_pool
+
+    // Test
+    vector<long> list;
+    for (int i = 0; i < 1000; ++i) {
+        list.push_back(i);
+    }
+
+
+    mutex m;
+    ThreadPool pool;
+    for (size_t i = 0; i < 10; ++i) {
+        auto r = pool.submit([&pool, &m](const std::string& path) {
+            {
+                lock_guard<mutex> guard(cout_mutex);
+                cout << path << endl;
+            }
+            future<Mat> src = pool.submit([](const std::string& path) {
+                Mat src =  imread(path);
+                Mat dst;
+                resize(src, dst, Size(128,128));
+                return dst;
+            }, std::cref(path));
+
+            Mat dst;
+
+            if (path.empty()) return dst;
+
+            Mat img = src.get();
+
+            auto prefix_pos = path.find("fddb");
+            string c_path = path.substr(prefix_pos);
+            const string prefix_path = "/Users/bbphuc/Desktop/output/";
+            string output_path = prefix_path + c_path;
+            {
+                lock_guard<mutex> lk(cout_mutex);
+                cout << "Writing on file " << output_path << endl;
+            }
+
+            create_folder(output_path);
+            try {
+                imwrite(output_path.c_str(), img);
+            } catch (...) {
+                lock_guard<mutex> lk(cout_mutex);
+                cout << "There are some error on file : " << path << endl;
+            }
+
+            return dst;
+        }, std::cref(files->at(i)));
+        r.get();
+    }
+
+    //imshow("Gfg", r.get());
+    //waitKey();
+ /*
  #if 1
     int counter = 0;
     DataSource ds;
@@ -121,5 +135,6 @@ int main(int argc, char *argv[])
     }
 
 #endif
+*/
     return 0;
 }
